@@ -1,4 +1,4 @@
-import sys
+import sys, time
 # CONSTANTS THAT DEFINES THE TYPES/DEBUG MODES #
 VERSION_STR         ='1.0-eien-alpha'
 DEBUG_MODE_NORM=0   ;   DEBUG_MODE_WARN=1   ;   DEBUG_MODE_FAIL=2
@@ -9,8 +9,7 @@ TAB_REPLACEMENT     = ' '*2
 VM_NINIT=0	;	VM_RUNNING=1	;	VM_FINISHED=2   ;   VM_SLEEP=3	;	VM_DIED=4
 class en_debug:
     def __init__(self, en: bool, lc: str, enablell=False):
-        self.enablell, self.enabled=enablell, en
-        self.dcolor=False
+        self.enablell, self.enabled=enablell, en    ;   self.dcolor=False
         self.location=lc    ;   self.outputs=[[1, sys.stdout]]
     def addOutput(self, output: any, enableColor=0):    self.outputs.append([enableColor, output])
     def write(self, s: str, mode=0):
@@ -33,7 +32,7 @@ class en_thread:
         self.registers, self.stack, self.vars=[0 for regid in range(0, 10+1)], [], {}
         self.sp, self.pc=0, 0
         self.eq, self.gt=False, False
-        self.state, self.at_tick=VM_RUNNING, 0
+        self.state, self.at_tick, self.sleep_until=VM_RUNNING, 0, 0
         self.file_target=self.__load_file(file) ;   self.code       =self.__format_code(self.file_target)
         # set the opcode table
         self.syscall_table={}
@@ -43,7 +42,7 @@ class en_thread:
             'jne':  [self.p_jne, 1], 	'jge': [self.p_jge, 1], 	'jle': [self.p_jle, 1],     'ce':	[self.p_ce, 1], 	'cne':  [self.p_cne, 1],	
             'cge': [self.p_cge, 1], 	'cle': [self.p_cle, 1],     'sysc': [self.p_sysc, 1],   'point':[self.p_point,1],   'inc':  [self.p_inc, 1],    
             'dec': [self.p_dec, 1],     'add': [self.p_add, 2],     'sub': [self.p_sub, 2],     'mul':  [self.p_mul, 2],    'div':  [self.p_div, 2],
-            'data':[self.p_data, 2]
+            'data':[self.p_data, 2],    'sat': [self.p_sat, 2],     'smgr': [self.p_smgr, 2],   'slen': [self.p_slen,2]
         }
         ## configuration ##
         self.enable_safe_exec=True
@@ -119,6 +118,11 @@ class en_thread:
                 index+=1
         return sectioned_code
     ## code parsing and execution ##
+    def __test_decimal(self, value: str):
+        # XXX: python doesn't have a method to check if a string contains a decimal number.
+        # so that is probably the best option?!
+        try:    float(value)    ; return True
+        except: return False
     def get_data(self, token: str):
         self.debug.ll("get_data(token: %s)"%(token))
         if 	token[0] in ('"',"'"):      return token[1:len(token)-1]
@@ -129,6 +133,7 @@ class en_thread:
                 return self.registers[register_idx]
             elif token in ('pc','sp'):  return (self.pc if token=='pc' else self.sp)
         elif	(token.isdigit() or token[1:len(token)].isdigit()): return int(token)
+        elif    self.__test_decimal(token): return float(token)
         else:   raise en_thread_err("invalid data: %s"%token)
     def set_data(self, value: any, dest: str):
         self.debug.ll("set_data(value: %s, dest: %s)"%(str(value), dest))
@@ -141,11 +146,11 @@ class en_thread:
             elif dest=='sp':self.sp=value
             elif dest=='pc':self.pc=value
         else:   raise en_thread_err("invalid destination: %s"%dest)
-    def goto(self, token: str, save_stack=False, use_points=True):
+    def goto(self, token: str, save_stack=False, allow_points=True):
         # NOTE: each time the code pointer moves, the var list resets.
         self.debug.ll("goto(token: %s, save_stack=%s)"%(token,str(save_stack))) ;   self.qdebug()
         if token[0] == '&':
-            self.make_sure(use_points, "invalid use of points: %s"%token)
+            self.make_sure(allow_points, "invalid use of points: %s"%token)
             name=token[1:len(token)]    ;   self.make_sure(self.code[self.at_label]['points'].get(name)!=None,"unknown label: %s"%name)
             self.pc = self.code[self.at_label]['points'].get(name)
         else:
@@ -160,11 +165,16 @@ class en_thread:
         self.make_sure(index<len(self.stack),"stack was not initialized at index %d"%index)
         self.stack[index]=value ;   return self.stack[index]
     def set_var(self, var_name: str, value: any):   self.vars[var_name] = value
-    def get_var(self, var_name: str):
-        self.make_sure(var_name in self.vars, "not defined variable: %s"%var_name)  ;   return self.vars[var_name]
+    def get_var(self, var_name: str):               self.make_sure(var_name in self.vars, "not defined variable: %s"%var_name)  ;   return self.vars[var_name]
     ## code operations ##
-    def p_data(self, args: list):
-        v_name,v_data=args[0],self.get_data(args[1])    ;   self.set_var(v_name, v_data)
+    def p_sat (self, args: list):
+        the_string=self.get_data(args[0])       ;    self.make_sure(isinstance(the_string, str),"sat expected STRING, got: %s"%the_string)
+        self.make_sure(isinstance(self.registers[0],int),"sat expects INT at register R0, got: %s"%str(self.registers[0]))
+        self.make_sure(self.registers[0]<=len(the_string),"sat couldn't index %d, out of bounds."%self.registers[0])
+        self.set_data(the_string[self.registers[0]],args[1])
+    def p_slen(self, args: list):   self.set_data(len(self.get_data(args[0])),args[1])
+    def p_smgr(self, args: list):   self.set_data(self.get_data(args[1])+self.get_data(args[0]),args[1])
+    def p_data(self, args: list):   v_name,v_data=args[0],self.get_data(args[1])    ;   self.set_var(v_name, v_data)
     def p_div(self, args: list):
         source_v=self.get_data(args[0]) ;   target_v=self.get_data(args[1])
         self.make_sure(isinstance(source_v,int) and isinstance(target_v,int),"add expects INT, got: %s/%s"%(str(source_v),str(target_v)))
@@ -198,18 +208,18 @@ class en_thread:
         self.eq, self.gt = False, False
     def p_sysc(self, args: list):
         source=self.get_data(args[0])   ; self.make_sure(self.syscall_table.get(source)!=None,"unknown syscall: %s"%str(source))
-        self.syscall_table.get(source)(self, [])
+        self.syscall_table.get(source)(self)
     def p_retn(self, args: list):
         self.make_sure(len(self.call_stack)>0,"unable to perform return!")
         self.at_label, self.pc, self.vars=self.call_stack.pop()
     def p_cle(self, args: list):
-        if not self.gt: self.goto(args[0],save_stack=True, use_points=False)
+        if not self.gt: self.goto(args[0],save_stack=True, allow_points=False)
     def p_cge(self, args: list):
-        if self.gt:     self.goto(args[0],save_stack=True, use_points=False)
+        if self.gt:     self.goto(args[0],save_stack=True, allow_points=False)
     def p_cne(self, args: list):
-        if not self.eq: self.goto(args[0],save_stack=True, use_points=False)
+        if not self.eq: self.goto(args[0],save_stack=True, allow_points=False)
     def p_ce(self, args: list):
-        if self.eq:     self.goto(args[0],save_stack=True, use_points=False)
+        if self.eq:     self.goto(args[0],save_stack=True, allow_points=False)
     def p_jle(self, args: list):
         if not self.gt: self.goto(args[0])
     def p_jge(self, args: list):
@@ -218,7 +228,7 @@ class en_thread:
         if not self.eq: self.goto(args[0])
     def p_je(self, args: list):
         if self.eq: self.goto(args[0])
-    def p_call(self, args: list):   self.goto(args[0],save_stack=True, use_points=False)
+    def p_call(self, args: list):   self.goto(args[0],save_stack=True, allow_points=False)
     def p_jump(self, args: list):   self.goto(args[0])
     def p_halt(self, args: list):   self.state=VM_FINISHED
     def p_cmpr(self, args: list):
@@ -228,16 +238,22 @@ class en_thread:
         try:    self.gt = (cmp0 > cmp1)
         except: pass
     def p_push(self, args: list):   self.set_stack(self.sp,self.get_data(args[0]))  ; self.sp+=1
-    def p_move(self, args: list):
-        source, target=args	;	self.set_data(self.get_data(source),target)
+    def p_move(self, args: list):   source, target=args	;	self.set_data(self.get_data(source),target)
     ## code execution ##
+    def set_sleep_until(self, until: int):  self.state, self.sleep_until=VM_SLEEP, (time.time()+until)
+    def __sleep_routine(self):
+        if time.time()>=self.sleep_until:   self.state=VM_RUNNING   ;   return False
+        else:                               return True
     def __safe_locks(self):
         if      sys.getsizeof(self.call_stack)>LIMIT_MEMORY_USAGE:  self.state=VM_DIED  ;   raise en_thread_err("stack has been using too much memory: %d"%sys.getsizeof(self.call_stack))
         if      len(self.call_stack)>self.limit_callstack:          self.state=VM_DIED  ;   raise en_thread_err("call stack has reached limit size: %d"%len(self.call_stack))
         elif    len(self.call_stack)==self.limit_callstack//2:      self.debug.warn("Call stack has reach 1/2 of limit.")
-    def step(self) -> bool:
+    def step(self) -> int:
         label_length=len(self.code[self.at_label]['code'])
-        if self.state!=VM_RUNNING:	return self.state
+        if self.state == VM_SLEEP:   
+            if self.__sleep_routine():  return self.state
+            else: pass
+        elif self.state != VM_RUNNING:      return self.state
         if self.pc>=label_length:	self.state=VM_FINISHED	;	return
         if self.enable_safe_exec:   self.__safe_locks()
         opcode=self.code[self.at_label]['code'][self.pc]	;	self.make_sure(isinstance(opcode,str),"invalid reading: %s"%str(opcode))
@@ -251,7 +267,7 @@ class en_thread:
         if self.inc_pc: self.pc+=(1)+arg_number
         else:           self.inc_pc = True
         # increment the tick
-        self.at_tick+=1
+        self.at_tick+=1     ;   return self.state
     def run(self):
         while self.state == VM_RUNNING:
             self.debug.write("tick: %0.8x"%self.at_tick)
