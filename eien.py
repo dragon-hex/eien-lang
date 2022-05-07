@@ -27,14 +27,17 @@ class en_thread_err(Exception):
 class en_thread:
     def __init__(self, file: str, ilabel=str('main'), debug=bool(False), low_level_debug=bool(True)):
         # internal values #
-        self.debug      = en_debug(debug, 'en_thread', enablell=low_level_debug)
-        self.at_label,  self.call_stack, self.inc_pc=ilabel, [], True
-        self.registers, self.stack, self.vars=[0 for regid in range(0, 10+1)], [], {}
-        self.sp, self.pc=0, 0
-        self.eq, self.gt=False, False
-        self.state, self.at_tick, self.sleep_until=VM_RUNNING, 0, 0
-        self.file_target=self.__load_file(file) ;   self.code       =self.__format_code(self.file_target)
-        # set the opcode table
+        self.debug = en_debug(debug, 'en_thread', enablell=low_level_debug)
+        self.reset_thread(ilabel=ilabel) ;   self.set_default_opcodes()
+        # init the file.
+        if file != None:    self.file_target=self.__load_file(file) ;   self.code       =self.__format_code(self.file_target)
+        else:               self.debug.ll("not loading files...")
+        # configuration
+        self.enable_safe_exec=True
+        self.limit_callstack =999
+    ## reset thread ##
+    def set_default_opcodes(self):
+        # set all the opcodes to the default
         self.syscall_table={}
         self.opcode_table={
             'move':	[self.p_move, 2],   'stki': [self.p_stki, 1],   'push': [self.p_push, 1],   'cmpr':	[self.p_cmpr, 2], 	'cli' : [self.p_cli, 0], 	
@@ -44,9 +47,12 @@ class en_thread:
             'dec': [self.p_dec, 1],     'add': [self.p_add, 2],     'sub': [self.p_sub, 2],     'mul':  [self.p_mul, 2],    'div':  [self.p_div, 2],
             'data':[self.p_data, 2],    'sat': [self.p_sat, 2],     'smgr': [self.p_smgr, 2],   'slen': [self.p_slen,2]
         }
-        ## configuration ##
-        self.enable_safe_exec=True
-        self.limit_callstack =999
+    def reset_thread(self, ilabel=str('main')):
+        self.at_label,  self.call_stack, self.inc_pc=ilabel, [], True
+        self.registers, self.stack, self.vars=[0 for regid in range(0, 10+1)], [], {}
+        self.sp, self.pc=0, 0
+        self.eq, self.gt=False, False
+        self.state, self.at_tick, self.sleep_until=VM_RUNNING, 0, 0
     ## utility functions ##
     def __format_code(self, buffer: list) -> list:
         organized_code=self.organize_code(buffer)   ; self.make_sure(organized_code.get(self.at_label),"impossible to find initial label: %s" % self.at_label)
@@ -62,6 +68,9 @@ class en_thread:
     def __load_file(self, name: str) -> list:
         file_ptr=open(name,'r') ; lines = [ line.replace('\n','').replace('\t',TAB_REPLACEMENT) for line in file_ptr ]
         file_ptr.close()        ; return self.tokenize(lines)
+    def load_lines(self, lines: list):
+        """load the code by lines provided."""
+        self.code=self.__format_code(self.tokenize(lines))
     def make_sure(self, eval: bool, at_error: str) -> None: 
         if not eval:	raise en_thread_err(at_error)
     def qdebug(self):
@@ -72,6 +81,8 @@ class en_thread:
         self.debug.ll("tokenize(%s)"%str(lines))
         line_index,line_counter=0,len(lines)
         parsed_lines=[]
+        def decide_append(a: str, l: list): 
+            if len(a)>0: l.append(a)
         while line_index < line_counter:
             line                        = lines[line_index]
             token_index, token_counter  = 0, len(line)
@@ -79,27 +90,15 @@ class en_thread:
             acc, tokens                 = "", []
             while token_index < token_counter:
                 token = line[token_index]
-                if token == ' ' and not in_string:
-                    if len(acc) > 0: tokens.append(acc)
-                    acc = ""
-                elif token == ',' and not in_string:
-                    if len(acc) > 0: tokens.append(acc)
-                    acc = ""
-                elif token == ';' and not in_string:
-                    if len(acc) > 0: tokens.append(acc)
-                    break
-                elif token in ("'", '"') and not in_string:
-                    if len(acc) > 0: tokens.append(acc)
-                    acc, in_string_ch, in_string = token, token, True
-                elif token in ("'", '"') and in_string and token == in_string_ch:
-                    if len(acc) > 0: tokens.append(acc+token)
-                    in_string, in_string_ch, acc = False, ' ', ''
-                else:
-                    acc += token
+                if token == ' ' and not in_string:  decide_append(acc,tokens)   ;   acc = ""
+                elif token == ',' and not in_string:    decide_append(acc,tokens)   ;   acc = ""
+                elif token == ';' and not in_string:    decide_append(acc,tokens)   ;   break
+                elif token in ("'", '"') and not in_string: decide_append(acc,tokens)   ;   acc, in_string_ch, in_string = token, token, True
+                elif token in ("'", '"') and in_string and token == in_string_ch:   decide_append(acc+token,tokens) ;   in_string, in_string_ch, acc = False, ' ', ''
+                else:   acc += token
                 token_index += 1
-            if len(acc) > 0:    tokens.append(acc)
-            if len(tokens) > 0: parsed_lines.append(tokens)
             if in_string:       raise en_thread_err("not closed string in line %d" % (line_index + 1))
+            decide_append(acc,tokens)   ;   decide_append(tokens,parsed_lines)
             line_index += 1
         return parsed_lines
     def organize_code(self, buf: list) -> dict:
